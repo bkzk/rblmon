@@ -1,0 +1,693 @@
+#!/usr/bin/perl
+#                                                                              #
+# rblmon - monitor server ip(s) on dns blacklists                              #
+#                                                                              #
+#                                                                              #
+# Copyright (C)  2014-2015   Bartosz Kozak                                     #
+#                                                                              #
+# This program is free software: you can redistribute it and/or modify         #
+# it under the terms of the GNU General Public License as published by         #
+# the Free Software Foundation, either version 2 of the License, or            #
+# (at your option) any later version.                                          #
+#                                                                              #
+# This program is distributed in the hope that it will be useful,              #
+# but WITHOUT ANY WARRANTY; without even the implied warranty of               #
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the                #
+# GNU General Public License for more details.                                 #
+#                                                                              #
+# You should have received a copy of the GNU General Public License            #
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.        #
+#                                                                              #
+#                                                                              #
+# ---------------------------------------------------------------------------- #
+# Requirements:                                                                #
+# ---------------------------------------------------------------------------- #
+#                                                                              #
+# CPAN Modules:                                                                #
+#  Data::Validate::IP                                                          #
+#  Data::Validate::Domain                                                      #
+# System:                                                                      #
+#  dig (debian:dnsutils,centos:bind-utils)                                     #
+#                                                                              #
+# ---------------------------------------------------------------------------- #
+# last modified: 20/07/2015                                                    #
+# ---------------------------------------------------------------------------- #
+#                                                                              #
+# 29/07/2014 written by Bartosz Kozak  <admin@bkzk.net>                        #
+#                                                                              #
+# **************************************************************************** #
+
+
+use strict;
+use warnings; 
+use Socket;
+use POSIX qw(strftime);
+use Term::ANSIColor qw(:constants);
+use Pod::Usage;
+#use Data::Dump qw(dump);
+
+my $PRGNAME = 'rblmon';
+my $VERSION = '0.6';
+my $AUTHOR  = 'bkzk <admin@bkzk.net>';
+my $date    = strftime "%F", localtime;
+my $rslv    = ''; 
+
+
+# popular dnsbl
+# check: http://www.dnsbl.info/dnsbl-list.php
+# https://en.wikipedia.org/wiki/Comparison_of_DNS_blacklists
+my @local_dnsbl = qw (
+   cbl.abuseat.org
+   dnsbl.sorbs.net
+   spam.dnsbl.sorbs.net
+   bl.spamcop.net
+   pbl.spamhaus.org
+   sbl.spamhaus.org
+   xbl.spamhaus.org
+   zen.spamhaus.org
+   sbl-xbl.spamhaus.org
+   ubl.unsubscore.com
+   dnsbl-1.uceprotect.net
+   dnsbl-2.uceprotect.net
+   dnsbl-3.uceprotect.net
+   dyna.spamrats.com
+   noptr.spamrats.com
+   spam.spamrats.com
+   b.barracudacentral.org
+   ips.backscatterer.org
+   truncate.gbudb.net
+   bl.spamcannibal.org
+   rbl.megarbl.net
+);
+
+my @user_dnsbl = (); 
+my %op         = ();
+
+if (@ARGV > 0){
+   use Getopt::Long;
+   GetOptions(
+     'v|version'         => \$op{op_vers},
+     'p|help|?'          => \$op{op_help},
+     'd|dnsbl|rbl=s'     => \$op{op_dlist},    # DNSBL HOSTNAME or File list of DNSBL hostname
+     'h|host=s'          => \$op{op_hlist},    # IP / HOSTNAME or File list of hostname
+     'log'               => \$op{op_log},      # log only hosts listed on DNSBL
+     'logall|log-all'    => \$op{op_logall},   # log all hosts status on DNSBL
+     'q|quiet'           => \$op{op_quiet},    # output format 
+     'r|rslv=s'          => \$op{op_rslv},     # resolver DNS
+     'dd'                => \$op{dd},    
+     'l|logfile|log-file=s'  => \$op{op_logfile},
+     'ld|logdir|log-dir=s'   => \$op{op_logdir},
+     'man|manual'        => sub { pod2usage(-exitval => 0, -verbose => 2) },
+   );
+}
+
+&help if defined $op{op_help};
+
+if ($#ARGV == -1 && keys %op == 0 ){
+   print "Missing arguments. Try usage -help or -man.\n";
+   exit (0);
+}
+
+
+my $q = $op{op_quiet} || 0 ; 
+
+my $logdir  = $ENV{PWD}; 
+my $logname = "dnsbl-$date.log" ;
+if (defined $op{op_logdir} && -d $op{op_logdir}){
+   $logdir = $op{op_logdir};
+}
+my $logfile = "$logdir/$logname";
+if (defined $op{op_logfile}){
+   $logfile = $op{op_logfile};
+}
+
+#print "'$logfile'\n"; exit;
+
+
+if (defined $op{op_rslv}){
+   if ($op{op_rslv} eq '' ){
+      print "Missing format argument !\n" ;
+      exit 1;
+   }
+   else {
+       if ( &ipcheck($op{op_rslv}) || &fqdncheck($op{op_rslv}) ){
+          $rslv = '@' . $op{op_rslv} ; 
+          #slv = '@' . $rslv;
+          print "Resolver: $rslv\n" if !$q ;
+       }
+       else  {
+          print "Resolver '$op{op_rslv}' not resolving.\n" if !$q;
+          exit 1;
+       }
+   }
+}
+else {
+   print "Resolver: system\n" if defined $op{dd};
+}
+
+####
+if (! eval { require Data::Validate::IP; 1; } ) {
+   warn "INFO: install Data::Validate::IP \n";
+}
+if (! eval { require Data::Validate::Domain; 1; } ) {
+   warn "INFO: install Data::Validate::Domain \n";
+}
+####
+
+
+
+# ---------------------------------------------------------------------------- #
+sub rblcheck(){
+
+    # host is revip 
+    my ($host, $rbldns) = @_ ;
+
+        # a dig way 
+    #print "dig +short $host.$rbldns "; 
+    open (RS, "dig +short $host.$rbldns $rslv |" )
+      or die "Could not execute 'dig' command !";
+    my @rs = <RS>;
+    close RS;
+
+    print "dig +short $host.$rbldns $rslv\t" if $op{dd}; 
+
+    if  ($#rs) { return 0 }
+    else { 
+      return 1 ;
+    }
+
+    # native perl dns query 
+    # --- not realy need  --- # 
+
+}
+# ---------------------------------------------------------------------------- #
+sub ipcheck(){
+
+     my $val_addr =  $_[0];
+     chomp $val_addr; 
+     # use Data::Validate::IP qw(is_ipv4 is_ipv6);
+     if ( eval { require Data::Validate::IP; 1; } ) {
+        if (Data::Validate::IP->new()->is_ipv4($val_addr)){
+           return 1 ; # it is ipv4
+        }
+        else {
+           #print "'$val_addr' :: not an IPv4 ip\n";
+           return 0 ; # it is not an ipv4
+        }
+     }
+     else  {
+        #warn "INFO: You should better install Data::Validate::IP , but without it should run !\n";
+        
+        # a little clever way with qr nad scope test 
+        my $rx = qr/^(?!(\.))(\.?(\d{1,3})(?(?{$^N > 255})(*FAIL))){4}$/;
+        if ( $val_addr  =~ $rx ){
+        #if ( $val_addr =~ /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/ ){
+           return 1 ; # it is ipv4
+        }
+        else {
+           return 0 ; # it is not an ipv4
+        }
+     }
+}
+# ---------------------------------------------------------------------------- #
+
+sub fqdncheck(){
+     my $val_addr =  $_[0];
+     chomp $val_addr;
+
+     # use Data::Validate::Domain qw(is_domain);
+     if ( eval { require Data::Validate::Domain; 1; } ) {
+        #my $v = Data::Validate::Domain->new();
+        if (Data::Validate::Domain->new()->is_domain($val_addr)){
+           return 1 ; # it is fqdn
+        }
+        else {
+           return 0 ; # it is not a fqdn
+        }
+     }
+     else  {
+        # regex only match a syntax, not a dns fqdn 
+        return 0 if length $val_addr > 255; 
+        #print "$val_addr: " . length($val_addr) . "\n";  
+        my $fqdn_re = '(?:(?:(?:(?:[a-zA-Z0-9][-a-zA-Z0-9]{0,61})?[a-zA-Z0-9])[.])*(?:[a-zA-Z][-a-zA-Z0-9]{0,61}[a-zA-Z0-9]|[a-zA-Z])[.]?)';
+
+        if ( $val_addr =~ /$fqdn_re/ ){
+           #print ":$1:$2:\n"; 
+           return 1 ; # it looks like a hostname
+        }
+        else {
+           return 0 ; # it doesn't 
+        }
+
+     }
+}
+
+# ---------------------------------------------------------------------------- #
+sub ipreverse(){
+
+     my $ipaddr = $_[0];
+     return join '.', reverse split /\./, $ipaddr;
+
+}
+# ---------------------------------------------------------------------------- #
+sub fqdn2ip(){
+
+    my $fqdn = $_[0];
+    if (gethostbyname($fqdn)){
+       return inet_ntoa(inet_aton($fqdn));
+    }
+    else {
+      print  "$fqdn is not resolving.\n";  exit 1;
+    }
+
+}
+# ---------------------------------------------------------------------------- #
+sub prl {
+
+     my ($no,$ch) = @_; my $line = '';
+     for(my $i=0;$i<= $no;$i++) { $line.="$ch"; }
+     return $line;
+
+}
+# ---------------------------------------------------------------------------- #
+# check the host value, is it:
+# - ipv4 address
+# - fqdn 
+# - file
+sub prephost(){
+
+     if ( defined $op{op_hlist} ) {
+         if ( -f $op{op_hlist} ) {
+            # read and parse file to array - return ref 
+            open (HL, "$op{op_hlist}" ) 
+              or die "Could not open $op{op_hlist}. $!";
+            my @hl = <HL>;
+            close HL;
+            #print @hl; 
+            return \@hl;
+         }
+         elsif ( &ipcheck($op{op_hlist}) ){
+            #print "is an ipv4\n";
+            # return reverse ip  
+            #print "iprev> ". &ipreverse($op{op_hlist}) ." \n"; 
+
+            return &ipreverse($op{op_hlist}); 
+         }
+         elsif ( &fqdncheck($op{op_hlist}) ) {
+            #print "is a domain name\n";
+            # convert to ip and return reverse ip 
+            my $ipaddr = &fqdn2ip($op{op_hlist});
+            #print "ipaddr> $ipaddr\n";
+            #print "iprev> " . &ipreverse($ipaddr) ." \n";
+
+            return  &ipreverse($ipaddr);
+         }
+         else {
+            print "$op{op_hlist} is not an IPv4 address or FQDN, neither a file list.\n" if !$q;
+            exit 1;
+         }
+     }
+     else {
+        print "Missing host/hostlist argument!\n";
+        exit 1;
+  
+     }
+
+}
+# ---------------------------------------------------------------------------- #
+sub prepdnsbl(){
+
+    if ( defined $op{op_dlist} ){
+       if ( $op{op_dlist} eq "" ){
+           print "Missing dnsbl hostname or file list!\n"; exit 1; 
+       }
+       if ( -f $op{op_dlist} ) {
+          # read and parse file to array - return ref 
+          open (DL, "$op{op_dlist}" ) 
+             or die "Could not open $op{op_dlist}. $!";
+          while (<DL>){
+             chomp;
+             if ($_ !~ /^$|^#/){
+                if ( &fqdncheck($_) ) {
+                    push @user_dnsbl, $_;
+                }
+             }
+          }
+          close DL;
+          #print @user_dnsbl; 
+          #exit ;
+          return \@user_dnsbl;
+       } 
+       elsif ( &fqdncheck($op{op_dlist}) ) {
+          #push @user_dnsbl, $op{op_dlist};
+          return  \$op{op_dlist};
+       }
+       else {
+          print "$op{op_dlist} is not a proper FQDN of DNSBL, neither a file list.\n";
+          exit 1;
+       }
+    }
+
+}
+# ---------------------------------------------------------------------------- #
+sub help(){
+     
+    print <<EOF;
+Usage: rblmon [OPTIONS] 
+
+ rblmon -h ip|hostname|file [-d hostname|file] [-r ip|hostname] [-q]
+        [-log|-logall] [-l filename] [-ld dirname] [-man|-help]
+
+ -h|-host     <ip|hostname|file>  - IP, hostname or file list of checked hosts
+ -d|-dnsbl    <hostname|file>     - DNSBL hostname or file list of DNSBL servers
+ -r|-rslv     <ip|hostname>       - Specify DNS resolver
+ -log                             - Logging only information about listed hosts
+ -log-all                         - Logging all information about hosts status
+ -ld|-logdir  </path/to/dir/>     - Specify log directory
+ -l|-logfile  </path/to/file.log> - Specify log filename 
+ -quit                            - Quieter output
+ -help                            - Prints this page and exit 
+ -man                             - Prints manual page and exit 
+
+ For some examples, try with -man.
+EOF
+
+    if ( ! (eval { require Data::Validate::IP; 1; }) ||  
+         ! (eval { require Data::Validate::Domain; 1; })  ) {
+          print "\nYou should install two perl modules but it should work just fine without\n".
+                "them too: Data::Validate::IP  Data::Validate::Domain .\n"
+    }
+
+    exit 0;
+}
+# ---------------------------------------------------------------------------- #
+# MAIN 
+# ---------------------------------------------------------------------------- #
+
+# check arg for host from cli and try to verify if it 
+# is ip, fqdn or file name
+
+my $rval = &prephost;
+
+# check arg for dnsbl host from cli and try to verify if it 
+# fqdn or file name
+
+my $rval2 = &prepdnsbl; 
+
+
+print "Processing list of DNSBL servers " if !$q;
+# default built-in dnsbl 
+my $dnsbl_list = \@local_dnsbl; 
+
+if (ref $rval2 eq "ARRAY" ){
+   $dnsbl_list = $rval2;
+   print "($op{op_dlist}) ... \n" if !$q;
+}
+elsif ( ref  $rval2 eq "SCALAR" ) {
+   $dnsbl_list = [$$rval2];
+   print "($op{op_dlist}) ... \n" if !$q;
+}
+else {
+    print "(built-in) ... \n" if !$q;
+}
+
+
+if (ref $rval eq "ARRAY" ){
+
+   # ************************************************* #
+   # for multiple hosts (file)                         #
+   # ************************************************* #
+
+   my %hl = () ; 
+
+   #dump $rval; 
+   print "Processing list of hosts ($op{op_hlist}) ...\n" if !$q; 
+   foreach my $key (@$rval){
+      chomp $key;
+      #print "$key\n";
+      if (&ipcheck($key)){
+         $hl{$key}{ip} = $key; 
+         $hl{$key}{revip} = &ipreverse($key); 
+      }
+      elsif (&fqdncheck($key)){
+         $hl{$key}{ip} = &fqdn2ip($key);
+         $hl{$key}{revip} = &ipreverse($hl{$key}->{ip} ); 
+      }
+   }
+   print "\n" if !$q;
+   #dump %hl;
+
+   # for each host from lists check dnsbl 
+   my $sumfound = 0 ;
+   my $size_dnsbl = scalar @{ $dnsbl_list } ;
+
+   foreach my $k (sort keys %hl){
+      printf "Checkin [ %30s ]   0/$size_dnsbl ", "$k" if !$q; 
+
+      my $found = 0; 
+      my $i=0; 
+
+      foreach my $dnsbl (@{ $dnsbl_list }){
+         $i++; 
+         if (&rblcheck($hl{$k}{revip},$dnsbl) ){
+            # IP is on DNSBL , make a note about it in our hash 
+            push @{$hl{$k}{dnsbl}} , $dnsbl ; 
+            $found++;
+            printf "\rCheckin [ %30s ]   %2d/$size_dnsbl   |   ", "$k",$i if !$q; 
+            #print RED "FOUND [$found]  ",RESET if !$q; 
+            print WHITE ON_RED "  FOUND  ",RESET,"    [$found] " if !$q; 
+            print "\r$k: $found " if $q;
+
+         }else {
+            if ($found){
+               printf "\rCheckin [ %30s ]   %2d/$size_dnsbl   |   ", "$k",$i if !$q; 
+               #print RED "FOUND [$found]  ",RESET if !$q; 
+               print WHITE ON_RED "  FOUND  ",RESET,"    [$found] " if !$q; 
+               print "\r$k: $found " if $q;
+
+            }
+            else {
+               printf "\rCheckin [ %30s ]   %2d/$size_dnsbl   |   ", "$k",$i if !$q; 
+               #print GREEN "CLEAR  ",RESET if !$q; 
+               print BLACK ON_GREEN "  CLEAR  ",RESET if !$q; 
+               print "\r$k: $found " if $q;
+
+            }
+         }
+      }
+      print "\n" if !$q;
+      print "\n" if $q;
+      $sumfound++ if $found; 
+   }
+   #print prl('70','=').$/ if !$q; 
+   print $/ if !$q;
+   if ($sumfound){
+      print "Summary: FOUND $sumfound of ".(scalar keys %hl)." hosts on DNSBL\n" if !$q; 
+   }
+   else {
+      print "Summary: All hosts are CLEAR. Unbelievable !\n" if !$q;
+   }
+
+   # *****************************************************************
+   # -log      - default logging only info about hosts on DNSBL      #
+   # -logall   - logging all information about hosts status on DNSBL #
+   # *************************************************************** #
+
+   if ($op{op_log} || $op{op_logall}){
+      open (LF,'>', $logfile)
+        or die "Could not open '$logfile'. $!"; 
+      
+      #dump %hl;
+      foreach my $key (keys %hl){
+         if (exists $hl{$key}{dnsbl}) {
+            # default log only this hosts on dnsbl 
+            print LF "$key: ", join ( ', ', @{ $hl{$key}{dnsbl} } )  , "\n";
+         }
+         else {
+            # logall 
+            print LF "$key: CLEAR\n" if defined $op{op_logall}; 
+         }
+      }
+      close LF; 
+      print "Logfile: $logfile\n" if !$q;
+   }
+
+}
+else {
+
+   # ************************************************* #
+   # for single host                                   #
+   # ************************************************* #
+
+   my $found = 0;
+
+   my %hl = () ;
+
+   #print "RVAL:$rval:".&ipreverse($rval)."\n";
+   print "Checkin [ $op{op_hlist} ] in:\n\n" if !$q;
+   #print prl('70','-').$/ if !$q; 
+   foreach my $dnsbl (@{ $dnsbl_list }){
+      printf "  %30s |  ",$dnsbl if !$q;
+      if (&rblcheck($rval,$dnsbl) ){
+         #print RED,"  FOUND\n",RESET if !$q; 
+         print WHITE  ON_RED,"  FOUND  ",RESET,"\n" if !$q; 
+	 #print "$rval: $dnsbl:1\n" if $q;
+	 print &ipreverse($rval).": $dnsbl:1\n" if $q;
+         $found++;
+
+         push @{$hl{$rval}{dnsbl}} , $dnsbl ;
+
+      }else {
+         #print GREEN,"NOT FOUND\n",RESET if !$q;
+         print  BLACK  ON_GREEN, "  CLEAR  ",RESET,"\n" if !$q;
+         #print "$rval: $dnsbl:0\n" if $q;
+         print &ipreverse($rval).": $dnsbl:0\n" if $q;
+      }
+   }
+   #print prl('70','=').$/;
+   print $/ ; 
+
+   if ($found){
+      print "Summary: $op{op_hlist} is ",RED,"FOUND",RESET," on [ ",RED,"$found/$#{$dnsbl_list}",RESET," ]\n" if !$q;
+   }
+   else{
+      print "Summary: $op{op_hlist} is ",GREEN,"CLEAR",RESET,"\n" if !$q;
+   }
+  
+   # logall option has sense only with multiple hosts 
+   if ($op{op_log} || $op{op_logall}){
+
+      open (LF,'>', $logfile)
+        or die "Could not open '$logfile'. $!";
+
+      #dump %hl;
+      foreach my $key (keys %hl){
+          if (exists $hl{$key}{dnsbl}) {
+             # default log only this hosts on dnsbl 
+             #print LF "$key: ", join ( ', ', @{ $hl{$key}{dnsbl} } )  , "\n";
+             print LF &ipreverse($key).": ", join ( ', ', @{ $hl{$key}{dnsbl} } )  , "\n";
+          }
+          #else {
+          #   # logall 
+          #   #print LF "$key: CLEAR\n" if defined $op{op_logall};
+          #   print LF &ipreverse($key).": CLEAR\n" if defined $op{op_logall};
+          #}
+      }
+      # logall
+      if (! keys %hl){
+         print LF &ipreverse($rval).": CLEAR\n" if defined $op{op_logall};
+      }
+      close LF;
+      print "Logfile: $logfile\n" if !$q;
+   }
+
+}
+
+__END__ 
+
+=pod
+
+=head1 RBLMON
+
+B<rblmon> - monitor your IP(s) on DNS BlackList's
+
+=head1 SYNOPSIS
+
+B<rblmon> B<-h> [I<ip|hostname|file>] [B<-d> I<hostname|file>] [B<-r> I<ip|hostname>] [B<-q>]
+          [B<-log>|B<-logall>] [B<-l> I<filename>] [B<-ld> I<dirname>] [-man|-help]
+
+=head1 DESCRIPTION
+
+ The rblmon script is used to monitor your ip or list  of ip addresses on 
+ specific  DNS Blacklist server  or  list  of  servers. It allows  you to  
+ specify your own list of ip and dnsbl servers. By default it  prints all
+ result in more user friendly way, but for further processing you can use 
+ a --quit option. 
+
+ The option are as follows: 
+
+=over 2
+
+=item B<-h> | B<-host>  I<ip|hostname|file>
+
+ Specify an IP, hostname or file with list of  hosts to  check on DNSBL 
+ servers
+
+=item B<-d> | B<-dnsbl> I<hostname|file>
+          
+ Specify the DNSBL server hostname or file with list of DNSBL servers.
+
+=item B<-r> | B<-rslv>  I<ip|hostname>
+
+ Specify the DNS resolver.
+
+=item B<-log>      
+
+ Logging only information about listed hosts. Mostly useful with multi-
+ ple addresses than with a single host.  Host will not be log if it was 
+ not listed on DNSBL server(s).
+
+=item B<-logall> |  B<-log-all>
+
+ Logging all information about hosts status. 
+
+ Example of log file : 
+
+ 192.0.2.2: sbl.spamhaus.org, zen.spamhaus.org, sbl-xbl.spamhaus.org
+ 192.0.2.3: CLEAR
+ 203.0.113.2: CLEAR
+ 203.0.113.10: truncate.gbudb.net, xbl.spamhaus.org, zen.spamhaus.org 
+ 198.51.100.22: CLEAR
+
+=item B<-l> | B<-logfile> I<logfile>
+
+ Specify a log file.  By defaults logs  are  stored in current  working 
+ directory.
+ 
+=item B<-ld> | B<-logdir> I</path/to/logdir/>
+
+B< >Specify directory for logs.  By default log files name are stored in
+ following format B<dnsbl-YYYY-MM-DD.log>
+
+=item B<-q> | B<-quiet>
+
+ Set an quiet output. Useful for further processing.
+
+=back
+
+=head1 EXAMPLES
+
+ Verify single host status on DNSBL server. 
+
+B< >B<rblmon -h 192.0.2.2 -d dnsbl.sorbs.net>
+
+ Verify single host status with list of DNSBL servers.
+
+B< >B<rblmon -h example.net -d dnsblserver.txt -r 8.8.8.8>
+
+ Verify multiple hosts from myservers.txt with list of DNSBL servers from
+ dnsblserver.txt
+
+B< >B<rblmon -h myservers.txt -d dnsblserver.txt -r 8.8.8.8>
+
+ If there is no DNSBL server specific from command line, default built-in
+ list of popular DNSBL servers is used. 
+
+B< >B<rblmon -h example.net>
+
+=head1 MODULES
+
+Data::Validate::IP
+
+Data::Validate::Domain
+
+=head1 LICENSE
+
+This is released under the GNU GENERAL PUBLIC LICENSE V2
+
+=head1 AUTHOR
+
+Bartosz Kozak L<admin@bkzk.net>
+
+=cut
+
