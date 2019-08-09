@@ -76,7 +76,6 @@ my @local_dnsbl = qw (
    b.barracudacentral.org
    ips.backscatterer.org
    truncate.gbudb.net
-   bl.spamcannibal.org
    rbl.megarbl.net
 );
 
