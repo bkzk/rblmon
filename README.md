@@ -1,7 +1,7 @@
 # rblmon
 
 
-Rblmon monitors your IP address or list of IP addresses on specific DNS Blacklist server or list of servers. It allows you to specify your own list of IP and DNSBL servers. By default, it prints all result in a more user-friendly way, but for further processing, you can use a 'quit' option.
+Rblmon monitors your IP address or list of IP addresses on a specific DNS Blacklist server or list of servers. It allows you to specify your list of IP and DNSBL servers. By default, it prints all results in a more user-friendly way, but for further processing, you can use a 'quiet' option.
 
 
 
@@ -11,15 +11,15 @@ Rblmon monitors your IP address or list of IP addresses on specific DNS Blacklis
 
 ### Installation / Requirements
 
-To get the latest version just clone it from Github. Copy it to your globally 
-accessible paths and make executable.
+Clone the repository and copy it to one of globally 
+accessible paths and set executable bit.
 
     git clone https://github.com/bkzk/rblmon.git
 
     cd rblmon
     install -m0755 rblmon /usr/local/bin
 
-It requires a DNS tool called 'dig' which can be found in a most modern Linux distribution.  
+It requires a DNS tool called 'dig' which can be found in a most modern Linux distributions.  
 
     #debian/ubuntu
     apt-get install dnsutils
@@ -27,12 +27,12 @@ It requires a DNS tool called 'dig' which can be found in a most modern Linux di
     #centos/red-hat
     yum install bind-utils
 
-Besides that you should install two extra perl modules, they are not mandatory but it’s better to have them.
+Install two extra Perl modules, they are not mandatory but the script works better with them.
 
 *  **`Data::Validate::IP`**
 *  **`Data::Validate::Domain`**
 
-These modules should be found with your distro repositories, if not you can try to install them using a cpan command.
+These modules should be found in your distro repositories, if not you can install them using a `cpan` tool.
 
     #debian/ubuntu
     apt-get install libdata-validate-ip-perl libdata-validate-domain-perl
@@ -49,11 +49,13 @@ These modules should be found with your distro repositories, if not you can try 
     rblmon -h [ip|hostname|file] [-d hostname|file] [-r ip|hostname] [-q]
               [-log|-logall] [-l filename] [-ld dirname] [-man|-help]
 
-Use `-help` or `-man` argument to get more information. You probably need to install a `perl-doc` package to be able to read perl manual.
+Use `-help` or `-man` argument to get more information. You may need to install a `perl-doc` package to read perl-based manuals.
 
 ### Description
 
-If there is no DNSBL server specified at the command line, a default built-in list of popular DNSBL servers is used.
+If there is no DNSBL server specified at the command line, a default built-in list of popular DNSBL servers is used. 
+
+__Note__: I do NOT maintain that built-in list anymore. There is a high chance number of those servers do not exist anymore. This may result in a positive FOUND match. 
 
     $ rblmon -h srv01.example.net
 
@@ -85,15 +87,15 @@ If there is no DNSBL server specified at the command line, a default built-in li
     Summary: srv01.example.net is FOUND on [ 2/20 ]
 
 
-To verify single host status on specific DNSBL server.
+To verify single host status on a specific DNSBL server.
 
     $ rblmon -h 192.0.2.2 -d dnsbl.sorbs.net
 
-To verify single host status on your own list of DNSBL servers.
+To verify the single host status on your list of DNSBL servers.
 
     $ rblmon -h srv01.example.net -d dnsblserver.txt -r 8.8.8.8
 
-When you have a pool of IP addresses or you need to verify multiple hosts you can use a file with the list of IP’s o hostnames (one per line) eg. myservers.txt. You can verify this list against specific DNSBL server or list of DNSBL servers store in file eg. dnsblserver.txt .
+When you have a pool of IP addresses or you need to verify multiple hosts you may use a file with the list of IPs o hostnames (one per line) eg. myservers.txt. You can verify this list against a specific DNSBL server or a list of DNSBL servers stored in a file eg. dnsblserver.txt .
 
     $ rblmon -h myservers.txt -d dnsblserver.txt -r 8.8.8.8
    
@@ -123,7 +125,7 @@ When you have a pool of IP addresses or you need to verify multiple hosts you ca
 
 Setting resolver from the command line allows you to use a different DNS server than defined by your system  (eg. /etc/resolv.conf).
 
-If there is a need for further processing, use a **`--quiet`** parameter to only retrieve the status.
+If there is a need for further processing, use a **`--quiet`** parameter to only retrieve statuses.
 
     $ rblmon -h srv01.example.net -d dnsblserver.txt -r 8.8.8.8 -q
     srv01.example.net: 0
@@ -176,11 +178,11 @@ To log some information use **`-log`** or **`-log-all`** . The difference betwee
     srv16.example.net: b.barracudacentral.org
     srv17.example.net: dnsbl-1.uceprotect.net
 
-The default name of the log file is `dnsbl-YYYY-MM-DD.log` and is stored in the current working directory. You can change the name of the file using  **`-l`** switch and/or log directory with **`-ld`** switch.
+The default name of the log file is `dnsbl-YYYY-MM-DD.log` and is stored in the current working directory. You can change the name of the file using  **`-l`** switch and, or the destination of the log directory using the  **`-ld`** switch.
 
 ### Cron
 
-In case you want to keep some logs, you can create a simple cron job to do this for you. In the example below all logs will be stored in /var/log/rbl/, so make sure this directory exists and that the user running the cron has write permissions. Set a proper path to your server and to DNSBL list (one ip or hostname per line).
+To keep logs, you can create a cron job to do it. In the example below all logs will be stored in /var/log/rbl/, so make sure this directory exists and that the user running the cron has the write permissions. Set a proper path to your server and to the DNSBL list (one IP or hostname per line).
 
     crontab -e 
     30 0 * * * rblmon -h /path/to/server.list -d /path/to/dnsbl.list -q -log-all -ld /var/log/rbl/ &>/dev/null
